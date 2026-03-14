@@ -64,42 +64,57 @@ async function searchLocation(query) {
   const cached = weatherCache.get(cacheKey);
   if (cached) return cached;
 
-  try {
-    const { data } = await axios.get(`${NOMINATIM_BASE}/search`, {
-      params: {
-        q: query,
-        format: 'json',
-        limit: 1,
-        addressdetails: 1,
-      },
-      headers: { 'User-Agent': 'WhatsAppWeatherBot/1.0' },
-      timeout: 8000,
-    });
+  // Try multiple search strategies
+  const searchQueries = [
+    query,                          // Original: "Khakhipipar"
+    `${query}, India`,              // With country: "Khakhipipar, India"
+    `${query} village`,             // With type: "Khakhipipar village"
+    `${query} village India`,       // Full: "Khakhipipar village India"
+  ];
 
-    if (!data || data.length === 0) return null;
+  for (const searchQuery of searchQueries) {
+    try {
+      const { data } = await axios.get(`${NOMINATIM_BASE}/search`, {
+        params: {
+          q: searchQuery,
+          format: 'json',
+          limit: 1,
+          addressdetails: 1,
+          countrycodes: '',         // Search worldwide
+        },
+        headers: { 'User-Agent': 'WhatsAppWeatherBot/1.0' },
+        timeout: 8000,
+      });
 
-    const place = data[0];
-    const result = {
-      lat: parseFloat(place.lat),
-      lon: parseFloat(place.lon),
-      displayName: place.display_name,
-      village: place.address?.village ||
-               place.address?.town ||
-               place.address?.city ||
-               place.address?.county ||
-               query,
-      country: place.address?.country || '',
-      state: place.address?.state || '',
-    };
+      if (data && data.length > 0) {
+        const place = data[0];
+        const result = {
+          lat: parseFloat(place.lat),
+          lon: parseFloat(place.lon),
+          displayName: place.display_name,
+          village: place.address?.village ||
+                   place.address?.hamlet ||
+                   place.address?.suburb ||
+                   place.address?.town ||
+                   place.address?.city ||
+                   place.address?.county ||
+                   query,
+          country: place.address?.country || '',
+          state: place.address?.state || '',
+        };
 
-    weatherCache.set(cacheKey, result);
-    return result;
-  } catch (err) {
-    logger.error('Nominatim search error:', err.message);
-    return null;
+        logger.info(`✅ Found location: ${result.village} via query: "${searchQuery}"`);
+        weatherCache.set(cacheKey, result);
+        return result;
+      }
+    } catch (err) {
+      logger.error(`Nominatim search error for "${searchQuery}":`, err.message);
+    }
   }
-}
 
+  logger.warn(`❌ Location not found: ${query}`);
+  return null;
+}
 // ── Current Weather ───────────────────────────────────────────────────────────
 async function getWeatherByCity(city, units = 'metric') {
   // First try OpenStreetMap for better village recognition
