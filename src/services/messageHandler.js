@@ -1,12 +1,14 @@
 const { logger } = require('../utils/logger');
-const { getWeatherByCity, getWeatherByCoords, getForecastByCity, getForecastByCoords } = require('./weatherService');
-const { sendTextMessage, sendWeatherReport, sendForecastReport, sendErrorMessage } = require('./whatsappService');
+const {
+  getWeatherByCity, getWeatherByCoords,
+  getForecastByCity, getForecastByCoords,
+} = require('./weatherService');
+const {
+  sendTextMessage, sendWeatherReport,
+  sendForecastReport, sendHourlyReport, sendErrorMessage,
+} = require('./whatsappService');
 const { sessionStore } = require('../utils/sessionStore');
 
-/**
- * Main message dispatcher.
- * Handles all inbound message types: text, location, interactive (button replies)
- */
 async function handleIncomingMessage(message, from, phoneNumberId) {
   const type = message.type;
 
@@ -18,10 +20,9 @@ async function handleIncomingMessage(message, from, phoneNumberId) {
     } else if (type === 'interactive') {
       await handleInteractiveMessage(message.interactive, from, phoneNumberId);
     } else {
-      await sendTextMessage(
-        phoneNumberId,
-        from,
-        '👋 Hi! I can give you real-time weather updates.\n\nJust send me:\n• A *city name* (e.g. "London")\n• Or *share your location* 📍'
+      await sendTextMessage(phoneNumberId, from,
+        '👋 Hi! Send me any *city or village name* to get weather!\n\n' +
+        'Type *help* to see all commands.'
       );
     }
   } catch (err) {
@@ -30,86 +31,123 @@ async function handleIncomingMessage(message, from, phoneNumberId) {
   }
 }
 
-/**
- * Handle plain text messages.
- * Could be a city name or a command like "forecast".
- */
 async function handleTextMessage(text, from, phoneNumberId) {
-  const lower = text.toLowerCase();
-
-  // Empty / too short
-  if (!text || text.length < 2) {
-    return sendTextMessage(
-      phoneNumberId,
-      from,
-      '🤔 Please send a city name (e.g. *"New York"*) or share your 📍 location.'
-    );
-  }
-
-  // User replied "yes" to forecast prompt
-  if (['yes', 'yes please', 'forecast', '3 day', '3-day', 'y'].includes(lower)) {
-    const session = sessionStore.get(from);
-    if (session?.lastCity) {
-      const forecast = await getForecastByCity(session.lastCity, session.units);
-      return sendForecastReport(phoneNumberId, from, forecast);
-    }
-    if (session?.lastCoords) {
-      const forecast = await getForecastByCoords(session.lastCoords.lat, session.lastCoords.lon, session.units);
-      return sendForecastReport(phoneNumberId, from, forecast);
-    }
-    return sendTextMessage(phoneNumberId, from, '📍 Please send a city name first, then I can give you the forecast!');
-  }
-
-  // User wants Fahrenheit
-  if (lower.includes('fahrenheit') || lower === 'f') {
-    sessionStore.set(from, { ...sessionStore.get(from), units: 'imperial' });
-    return sendTextMessage(phoneNumberId, from, '✅ Switched to Fahrenheit. Now send me a city name!');
-  }
-
-  // User wants Celsius
-  if (lower.includes('celsius') || lower === 'c') {
-    sessionStore.set(from, { ...sessionStore.get(from), units: 'metric' });
-    return sendTextMessage(phoneNumberId, from, '✅ Switched to Celsius. Now send me a city name!');
-  }
-
-  // Help
-  if (['help', 'hi', 'hello', 'hey', 'start'].includes(lower)) {
-    return sendTextMessage(
-      phoneNumberId,
-      from,
-      '🌤 *WhatsApp Weather Bot*\n\n' +
-      'Here\'s what I can do:\n\n' +
-      '📍 Send a *city name* → Get current weather\n' +
-      '📎 *Share your location* → Get weather for your exact spot\n' +
-      '📅 Reply *"yes"* → Get a 3-day forecast\n' +
-      '🌡 Type *"Celsius"* or *"Fahrenheit"* → Switch units\n\n' +
-      'Try it: Type *"Tokyo"* 🗾'
-    );
-  }
-
-  // Treat input as a city name
+  const lower = text.toLowerCase().trim();
   const session = sessionStore.get(from) || {};
   const units = session.units || process.env.DEFAULT_UNITS || 'metric';
 
-  const weather = await getWeatherByCity(text, units);
-
-  if (!weather) {
-    return sendTextMessage(
-      phoneNumberId,
-      from,
-      `😕 I couldn't find weather data for *"${text}"*.\n\nPlease check the city name and try again, or share your 📍 location instead.`
+  // Empty message
+  if (!text || text.length < 2) {
+    return sendTextMessage(phoneNumberId, from,
+      '🤔 Please send a city or village name!'
     );
   }
 
-  // Save to session for forecast follow-up
-  sessionStore.set(from, { ...session, lastCity: text, units });
+  // Help
+  if (['help', 'hi', 'hello', 'hey', 'start', 'menu'].includes(lower)) {
+    return sendTextMessage(phoneNumberId, from,
+      '🌤 *WhatsApp Weather Bot*\n\n' +
+      '*Commands:*\n\n' +
+      '🏙 Send any *city name* → Current weather\n' +
+      '🏘 Send any *village name* → Village weather\n' +
+      '📍 *Share location* → Exact GPS weather\n' +
+      '📅 Reply *forecast* → 5-day forecast\n' +
+      '🕐 Reply *hourly* → Next 6 hours\n' +
+      '⭐ Type *save* → Save favorite city\n' +
+      '🏠 Type *home* → Get favorite city weather\n' +
+      '🌡 Type *fahrenheit* → Switch to °F\n' +
+      '🌡 Type *celsius* → Switch to °C\n' +
+      '📊 Type *last* → Repeat last weather\n\n' +
+      '_Example: Type *"Katihar"* to get started!_'
+    );
+  }
 
+  // Forecast
+  if (['forecast', 'yes', 'yes please', '5 day', '5-day', 'y'].includes(lower)) {
+    return await sendForecast(from, phoneNumberId, units);
+  }
+
+  // Hourly
+  if (['hourly', 'hours', '6 hours', 'hour'].includes(lower)) {
+    return await sendHourly(from, phoneNumberId, units);
+  }
+
+  // Save favorite city
+  if (lower === 'save') {
+    if (session.lastCity) {
+      sessionStore.set(from, { ...session, favoriteCity: session.lastCity });
+      return sendTextMessage(phoneNumberId, from,
+        `⭐ *${session.lastCity}* saved as your favorite city!\n\nType *home* anytime to get its weather instantly.`
+      );
+    }
+    return sendTextMessage(phoneNumberId, from,
+      '😕 Please search for a city first, then type *save*.'
+    );
+  }
+
+  // Get favorite city
+  if (['home', 'favorite', 'favourite', 'fav'].includes(lower)) {
+    if (session.favoriteCity) {
+      const weather = await getWeatherByCity(session.favoriteCity, units);
+      if (weather) {
+        sessionStore.set(from, { ...session, lastCity: session.favoriteCity });
+        return sendWeatherReport(phoneNumberId, from, weather);
+      }
+    }
+    return sendTextMessage(phoneNumberId, from,
+      '😕 No favorite city saved yet!\n\nSearch for a city first, then type *save*.'
+    );
+  }
+
+  // Repeat last weather
+  if (['last', 'again', 'repeat'].includes(lower)) {
+    if (session.lastCity) {
+      const weather = await getWeatherByCity(session.lastCity, units);
+      if (weather) return sendWeatherReport(phoneNumberId, from, weather);
+    }
+    if (session.lastCoords) {
+      const weather = await getWeatherByCoords(
+        session.lastCoords.lat, session.lastCoords.lon, units
+      );
+      if (weather) return sendWeatherReport(phoneNumberId, from, weather);
+    }
+    return sendTextMessage(phoneNumberId, from,
+      '😕 No recent search found. Please send a city name first!'
+    );
+  }
+
+  // Switch to Fahrenheit
+  if (lower.includes('fahrenheit') || lower === 'f') {
+    sessionStore.set(from, { ...session, units: 'imperial' });
+    return sendTextMessage(phoneNumberId, from,
+      '✅ Switched to *Fahrenheit °F*\n\nSend any city name to get weather!'
+    );
+  }
+
+  // Switch to Celsius
+  if (lower.includes('celsius') || lower === 'c') {
+    sessionStore.set(from, { ...session, units: 'metric' });
+    return sendTextMessage(phoneNumberId, from,
+      '✅ Switched to *Celsius °C*\n\nSend any city name to get weather!'
+    );
+  }
+
+  // Treat as city or village name
+  const weather = await getWeatherByCity(text, units);
+
+  if (!weather) {
+    return sendTextMessage(phoneNumberId, from,
+      `😕 Could not find *"${text}"*.\n\n` +
+      `Please check the spelling or try:\n` +
+      `• A nearby bigger city\n` +
+      `• Share your 📍 GPS location instead`
+    );
+  }
+
+  sessionStore.set(from, { ...session, lastCity: text, lastCoords: null, units });
   await sendWeatherReport(phoneNumberId, from, weather);
 }
 
-/**
- * Handle GPS location pins shared from WhatsApp.
- */
 async function handleLocationMessage(location, from, phoneNumberId) {
   const { latitude, longitude } = location;
   const session = sessionStore.get(from) || {};
@@ -123,34 +161,74 @@ async function handleLocationMessage(location, from, phoneNumberId) {
     return sendErrorMessage(phoneNumberId, from, 'weather');
   }
 
-  sessionStore.set(from, { ...session, lastCoords: { lat: latitude, lon: longitude }, lastCity: null, units });
+  sessionStore.set(from, {
+    ...session,
+    lastCoords: { lat: latitude, lon: longitude },
+    lastCity: null,
+    units
+  });
 
   await sendWeatherReport(phoneNumberId, from, weather);
 }
 
-/**
- * Handle button reply interactions (e.g., "Get Forecast" button).
- */
 async function handleInteractiveMessage(interactive, from, phoneNumberId) {
   const buttonId = interactive?.button_reply?.id || interactive?.list_reply?.id;
+  const session = sessionStore.get(from) || {};
+  const units = session.units || process.env.DEFAULT_UNITS || 'metric';
 
   if (buttonId === 'get_forecast') {
-    const session = sessionStore.get(from) || {};
-    const units = session.units || process.env.DEFAULT_UNITS || 'metric';
-
-    let forecast = null;
-    if (session.lastCity) {
-      forecast = await getForecastByCity(session.lastCity, units);
-    } else if (session.lastCoords) {
-      forecast = await getForecastByCoords(session.lastCoords.lat, session.lastCoords.lon, units);
-    }
-
-    if (forecast) {
-      return sendForecastReport(phoneNumberId, from, forecast);
-    }
+    return await sendForecast(from, phoneNumberId, units);
   }
 
-  await sendTextMessage(phoneNumberId, from, '👋 Send me a city name to get started!');
+  if (buttonId === 'get_hourly') {
+    return await sendHourly(from, phoneNumberId, units);
+  }
+
+  await sendTextMessage(phoneNumberId, from,
+    '👋 Send me any city or village name to get started!'
+  );
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+async function sendForecast(from, phoneNumberId, units) {
+  const session = sessionStore.get(from) || {};
+  let forecast = null;
+
+  if (session.lastCity) {
+    forecast = await getForecastByCity(session.lastCity, units);
+  } else if (session.lastCoords) {
+    forecast = await getForecastByCoords(
+      session.lastCoords.lat, session.lastCoords.lon, units
+    );
+  }
+
+  if (forecast) return sendForecastReport(phoneNumberId, from, forecast);
+
+  return sendTextMessage(phoneNumberId, from,
+    '📍 Please send a city or village name first!'
+  );
+}
+
+async function sendHourly(from, phoneNumberId, units) {
+  const session = sessionStore.get(from) || {};
+  let forecast = null;
+
+  if (session.lastCity) {
+    forecast = await getForecastByCity(session.lastCity, units);
+  } else if (session.lastCoords) {
+    forecast = await getForecastByCoords(
+      session.lastCoords.lat, session.lastCoords.lon, units
+    );
+  }
+
+  if (forecast) return sendHourlyReport(phoneNumberId, from, forecast);
+
+  return sendTextMessage(phoneNumberId, from,
+    '📍 Please send a city or village name first!'
+  );
 }
 
 module.exports = { handleIncomingMessage };
+
+

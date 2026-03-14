@@ -4,9 +4,6 @@ const { logger } = require('../utils/logger');
 const WA_API_VERSION = 'v20.0';
 const WA_BASE = `https://graph.facebook.com/${WA_API_VERSION}`;
 
-/**
- * Core function to send any WhatsApp message payload.
- */
 async function sendMessage(phoneNumberId, payload) {
   try {
     const { data } = await axios.post(
@@ -28,9 +25,6 @@ async function sendMessage(phoneNumberId, payload) {
   }
 }
 
-/**
- * Send a plain text message.
- */
 async function sendTextMessage(phoneNumberId, to, text) {
   return sendMessage(phoneNumberId, {
     messaging_product: 'whatsapp',
@@ -41,24 +35,41 @@ async function sendTextMessage(phoneNumberId, to, text) {
   });
 }
 
-/**
- * Send weather report with an interactive "Get 3-Day Forecast" button.
- */
 async function sendWeatherReport(phoneNumberId, to, weather) {
-  const { city, country, temp, feelsLike, humidity, windSpeed, windUnit, condition, emoji, symbol, visibility, pressure, sunrise, sunset } = weather;
+  const {
+    fullLocation, country, temp, feelsLike, heatIndex,
+    humidity, windSpeed, windUnit, windDirection,
+    condition, emoji, symbol, visibility, pressure,
+    dewPoint, cloudCover, sunrise, sunset
+  } = weather;
+
+  const rainWarning = weather.raw === 'Rain' || weather.raw === 'Drizzle' || weather.raw === 'Thunderstorm'
+    ? '\n\n🌧 *Rain detected! Carry an umbrella!*'
+    : '';
+
+  const heatWarning = temp > 38
+    ? '\n\n🔥 *Extreme heat! Stay hydrated!*'
+    : '';
+
+  const coldWarning = temp < 5
+    ? '\n\n🥶 *Very cold! Wear warm clothes!*'
+    : '';
 
   const body =
-    `${emoji} *Weather in ${city}, ${country}*\n\n` +
+    `${emoji} *Weather in ${fullLocation}, ${country}*\n\n` +
     `🌡 Temperature: *${temp}${symbol}*\n` +
     `🤔 Feels like: *${feelsLike}${symbol}*\n` +
+    `🌡 Heat Index: *${heatIndex}${symbol}*\n` +
     `☁️ Condition: *${condition}*\n` +
     `💧 Humidity: *${humidity}%*\n` +
-    `💨 Wind: *${windSpeed} ${windUnit}*\n` +
+    `🌫 Dew Point: *${dewPoint}${symbol}*\n` +
+    `☁️ Cloud Cover: *${cloudCover}%*\n` +
+    `💨 Wind: *${windSpeed} ${windUnit} ${windDirection}*\n` +
     `👁 Visibility: *${visibility}*\n` +
     `📊 Pressure: *${pressure} hPa*\n` +
-    `🌅 Sunrise: *${sunrise}* | 🌇 Sunset: *${sunset}*`;
+    `🌅 Sunrise: *${sunrise}* | 🌇 Sunset: *${sunset}*` +
+    rainWarning + heatWarning + coldWarning;
 
-  // Use interactive buttons to offer forecast
   return sendMessage(phoneNumberId, {
     messaging_product: 'whatsapp',
     recipient_type: 'individual',
@@ -67,26 +78,21 @@ async function sendWeatherReport(phoneNumberId, to, weather) {
     interactive: {
       type: 'button',
       body: { text: body },
-      footer: { text: '📅 Want the 3-day forecast?' },
+      footer: { text: '📅 Want more details?' },
       action: {
         buttons: [
-          {
-            type: 'reply',
-            reply: { id: 'get_forecast', title: '📅 3-Day Forecast' },
-          },
+          { type: 'reply', reply: { id: 'get_forecast', title: '📅 5-Day Forecast' } },
+          { type: 'reply', reply: { id: 'get_hourly', title: '🕐 Hourly (6hrs)' } },
         ],
       },
     },
   });
 }
 
-/**
- * Send a 3-day forecast report as text.
- */
 async function sendForecastReport(phoneNumberId, to, forecastData) {
-  const { city, country, forecasts, symbol } = forecastData;
+  const { city, country, forecasts, symbol, bestTimeOutside } = forecastData;
 
-  let text = `📅 *3-Day Forecast for ${city}, ${country}*\n`;
+  let text = `📅 *5-Day Forecast for ${city}, ${country}*\n`;
   text += '─'.repeat(30) + '\n\n';
 
   for (const day of forecasts) {
@@ -94,33 +100,49 @@ async function sendForecastReport(phoneNumberId, to, forecastData) {
       `${day.emoji} *${day.label}*\n` +
       `  🌡 High: ${day.high}${symbol} / Low: ${day.low}${symbol}\n` +
       `  ☁️ ${day.condition}\n` +
+      `  🌧 Rain Chance: ${day.rainChance}%\n` +
       `  💧 Humidity: ${day.humidity}%\n` +
       `  💨 Wind: ${day.windSpeed} ${day.windUnit}\n\n`;
   }
 
+  text += `🚶 *Best time to go outside today:* ${bestTimeOutside}\n\n`;
   text += '_Data powered by OpenWeatherMap_';
 
   return sendTextMessage(phoneNumberId, to, text);
 }
 
-/**
- * Send a graceful error message based on error type.
- */
+async function sendHourlyReport(phoneNumberId, to, forecastData) {
+  const { city, country, hourly } = forecastData;
+
+  let text = `🕐 *Next 6 Hours in ${city}, ${country}*\n`;
+  text += '─'.repeat(30) + '\n\n';
+
+  for (const hour of hourly) {
+    text +=
+      `${hour.emoji} *${hour.time}*\n` +
+      `  🌡 ${hour.temp}${hour.symbol}\n` +
+      `  ☁️ ${hour.condition}\n` +
+      `  🌧 Rain Chance: ${hour.rainChance}%\n\n`;
+  }
+
+  return sendTextMessage(phoneNumberId, to, text);
+}
+
 async function sendErrorMessage(phoneNumberId, to, errorType) {
   const messages = {
-    city: '😕 City not found. Please check the spelling and try again.\n\nExample: *"Paris"*, *"New York"*, *"Mumbai"*',
-    weather: '⚠️ I couldn\'t fetch weather data right now. Please try again in a moment.',
-    general: '⚠️ Something went wrong on my end. Please try again shortly.',
-    rate_limit: '🚦 You\'re sending messages too fast! Please wait a minute and try again.',
+    city: '😕 Village/City not found. Please check the name and try again.\n\nExamples:\n• *"Mumbai"*\n• *"Katihar"*\n• *"Your village name"*',
+    weather: '⚠️ Could not fetch weather right now. Please try again in a moment.',
+    general: '⚠️ Something went wrong. Please try again shortly.',
+    rate_limit: '🚦 Too many messages! Please wait a minute and try again.',
   };
 
-  const text = messages[errorType] || messages.general;
-  return sendTextMessage(phoneNumberId, to, text);
+  return sendTextMessage(phoneNumberId, to, messages[errorType] || messages.general);
 }
 
 module.exports = {
   sendTextMessage,
   sendWeatherReport,
   sendForecastReport,
+  sendHourlyReport,
   sendErrorMessage,
 };
